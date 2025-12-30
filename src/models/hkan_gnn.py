@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import HeteroConv, SAGEConv
+from torch_geometric.nn import HeteroConv, GATConv
 from src.models.kan_layer import KANLayer
 
 class HKANGNN(nn.Module):
@@ -13,15 +13,15 @@ class HKANGNN(nn.Module):
         self.sender_proj = nn.Linear(1, hidden_channels)
 
         self.conv1 = HeteroConv({
-            edge_type: SAGEConv(hidden_channels, hidden_channels)
+            edge_type: GATConv(hidden_channels, hidden_channels, heads=2, concat=False, add_self_loops=False)
             for edge_type in metadata[1]
-        }, aggr='mean')
+        }, aggr='sum')
         
-        self.gate = nn.Parameter(torch.tensor([0.5])) 
-        self.classifier = KANLayer(hidden_channels, out_channels)
+        # KAN bây giờ nhận đầu vào là (hidden_channels * 2) do phép Concatenation
+        self.classifier = KANLayer(hidden_channels * 2, out_channels)
 
     def forward(self, x_dict, edge_index_dict):
-        # 1. Feature Projection
+        # 1. Projection
         x_dict = {
             node_type: self.email_proj(x) if node_type == 'email' else
                        self.url_proj(x) if node_type == 'url' else
@@ -29,23 +29,22 @@ class HKANGNN(nn.Module):
             for node_type, x in x_dict.items()
         }
 
-        # Lưu lại đặc trưng Email gốc cho Residual
-        res_email = x_dict['email']
+        # Giữ lại bản sao BERT
+        bert_info = x_dict['email']
 
         # 2. Message Passing
-        # Gộp output của conv1 vào x_dict hiện tại để tránh KeyError
-        gnn_out = self.conv1(x_dict, edge_index_dict)
-        for node_type, x in gnn_out.items():
-            x_dict[node_type] = x
+        try:
+            gnn_out = self.conv1(x_dict, edge_index_dict)
+            graph_info = gnn_out['email']
+        except:
+            graph_info = torch.zeros_like(bert_info)
 
-        # 3. Activation
-        x_dict = {key: F.leaky_relu(x, 0.2) for key, x in x_dict.items()}
+        graph_info = F.leaky_relu(graph_info, 0.2)
 
-        # 4. Gated Residual Connection
-        alpha = torch.sigmoid(self.gate)
-        # Bây giờ 'email' chắc chắn tồn tại trong x_dict
-        x_dict['email'] = alpha * x_dict['email'] + (1 - alpha) * res_email
+        # 3. CONCATENATION (Quyết định thắng bại)
+        # Nối BERT và Graph info lại: 64 + 64 = 128 chiều
+        combined_info = torch.cat([bert_info, graph_info], dim=-1)
 
-        # 5. KAN Classification
-        out = self.classifier(x_dict['email'])
+        # 4. KAN Classification
+        out = self.classifier(combined_info)
         return out
