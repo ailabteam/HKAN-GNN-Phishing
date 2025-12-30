@@ -5,7 +5,7 @@ from url_features import get_url_features
 from collections import Counter
 
 def build():
-    with open('data/processed/features_bert.pkl', 'rb') as f:
+    with open('data/processed/features_bert_large.pkl', 'rb') as f:
         data = pickle.load(f)
     
     email_embeddings = data['embeddings']
@@ -61,7 +61,7 @@ def build():
         graph['email', 'contains', 'url'].edge_index = torch.empty((2, 0), dtype=torch.long)
 
     # 4. Lưu đồ thị
-    torch.save(graph, 'data/processed/hetero_graph.pt')
+    torch.save(graph, 'data/processed/hetero_graph_large.pt')
     
     print("✅ Heterogeneous Graph Built!")
     print(f"Nodes: Email({graph['email'].num_nodes}), Sender({graph['sender'].num_nodes}), URL({graph['url'].num_nodes})")
