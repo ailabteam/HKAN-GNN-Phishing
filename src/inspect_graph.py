@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 def inspect():
-    graph = torch.load('data/processed/hetero_graph.pt')
+    graph = torch.load('data/processed/hetero_graph_large.pt')
     
     with PdfPages('figures/graph_statistics.pdf') as pdf:
         plt.figure(figsize=(8, 6))
