@@ -28,7 +28,7 @@ if __name__ == "__main__":
     df = pd.read_pickle('data/processed/email_data.pkl')
     
     print(f"Generating BERT embeddings for {len(df)} emails on {torch.cuda.get_device_name(0)}...")
-    embeddings = generate_bert_embeddings(df['body'].tolist())
+    embeddings = generate_bert_embeddings(df['body'].tolist(), batch_size=128)
     
     # Lưu embeddings và metadata
     feature_data = {
