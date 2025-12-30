@@ -7,7 +7,7 @@ from collections import Counter
 def build():
     with open('data/processed/features_bert_large.pkl', 'rb') as f:
         data = pickle.load(f)
-    
+
     email_embeddings = data['embeddings']
     labels = data['labels']
     senders_list = data['senders']
@@ -16,7 +16,7 @@ def build():
     # 1. Map Senders to IDs
     unique_senders = list(set(senders_list))
     sender_to_id = {s: i for i, s in enumerate(unique_senders)}
-    
+
     # 2. Map unique URLs to IDs
     all_urls = [url for sublist in urls_list for url in sublist]
     unique_urls = list(set(all_urls))
@@ -54,15 +54,30 @@ def build():
     for i, urls in enumerate(urls_list):
         for u in urls:
             email_url_edge.append([i, url_to_id[u]])
-    
+
     if email_url_edge:
         graph['email', 'contains', 'url'].edge_index = torch.tensor(email_url_edge).t().contiguous()
     else:
         graph['email', 'contains', 'url'].edge_index = torch.empty((2, 0), dtype=torch.long)
 
     # 4. Lưu đồ thị
+    # Thêm vào cuối hàm build() trong src/build_graph.py
+    num_emails = graph['email'].num_nodes
+    indices = torch.randperm(num_emails)
+
+    train_size = int(0.7 * num_emails)
+    val_size = int(0.1 * num_emails)
+
+    graph['email'].train_mask = torch.zeros(num_emails, dtype=torch.bool)
+    graph['email'].val_mask = torch.zeros(num_emails, dtype=torch.bool)
+    graph['email'].test_mask = torch.zeros(num_emails, dtype=torch.bool)
+
+    graph['email'].train_mask[indices[:train_size]] = True
+    graph['email'].val_mask[indices[train_size:train_size+val_size]] = True
+    graph['email'].test_mask[indices[train_size+val_size:]] = True
+
     torch.save(graph, 'data/processed/hetero_graph_large.pt')
-    
+
     print("✅ Heterogeneous Graph Built!")
     print(f"Nodes: Email({graph['email'].num_nodes}), Sender({graph['sender'].num_nodes}), URL({graph['url'].num_nodes})")
     print(f"Edges: Email-Sender({graph['email', 'sent_by', 'sender'].num_edges}), Email-URL({graph['email', 'contains', 'url'].num_edges})")
