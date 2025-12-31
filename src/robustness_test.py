@@ -11,8 +11,8 @@ import os
 def run_robustness_test():
     device = torch.device('cuda')
     graph_path = 'data/processed/hetero_graph_large.pt'
-    model_path = 'experiments/model_final.pth'
-    
+    model_path = 'experiments/model_sota_final.pth'
+
     if not os.path.exists(model_path):
         print(f"Error: {model_path} not found!")
         return
@@ -20,7 +20,7 @@ def run_robustness_test():
     # 1. Load Graph và chuyển thành Vô hướng (giống lúc train)
     graph = torch.load(graph_path, weights_only=False)
     data = ToUndirected()(graph).to(device)
-    
+
     # 2. Khởi tạo và Load Model Final
     # Đảm bảo hidden_channels=64 đúng như cấu hình cuối cùng của bạn
     model = HKANGNN(64, 2, data.metadata()).to(device)
@@ -54,11 +54,11 @@ def run_robustness_test():
             noisy_data_no_edges = copy.deepcopy(noisy_data)
             for et in list(noisy_data_no_edges.edge_index_dict.keys()):
                 noisy_data_no_edges[et].edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
-            
+
             out_text = model(noisy_data_no_edges.x_dict, noisy_data_no_edges.edge_index_dict)
             pred_text = out_text[noisy_data_no_edges['email'].test_mask].argmax(dim=1).cpu()
             text_only_f1s.append(f1_score(y_true, pred_text))
-        
+
         print(f"  Sigma: {sigma:.1f} | Full F1: {hkan_f1s[-1]:.4f} | Text-only F1: {text_only_f1s[-1]:.4f}")
 
     # 4. Xuất đồ thị so sánh
@@ -66,18 +66,18 @@ def run_robustness_test():
         plt.figure(figsize=(9, 6))
         plt.plot(noise_levels, hkan_f1s, 'o-', label='Full HKAN-GNN (Semantic + Structural)', color='#1f77b4', linewidth=2.5)
         plt.plot(noise_levels, text_only_f1s, 's--', label='Text-only (Semantic only)', color='#d62728', linewidth=2)
-        
+
         plt.title('Model Resilience Against Adversarial Semantic Noise', fontsize=14)
         plt.xlabel('Noise Intensity ($\sigma$)', fontsize=12)
         plt.ylabel('Phishing F1-Score', fontsize=12)
         plt.ylim(0, 1.0)
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.legend(loc='lower left', fontsize=11)
-        
+
         # Thêm annotation giải thích
         plt.annotate('Graph structure maintains\nperformance', xy=(0.3, hkan_f1s[3]), xytext=(0.35, 0.7),
                      arrowprops=dict(facecolor='black', shrink=0.05, width=1))
-        
+
         pdf.savefig()
         plt.close()
 
