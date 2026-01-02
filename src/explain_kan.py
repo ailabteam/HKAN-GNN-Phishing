@@ -4,56 +4,43 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from src.models.hkan_gnn import HKANGNN
 from torch_geometric.transforms import ToUndirected
-import os
 
-def explain():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    graph_path = 'data/processed/hetero_graph_large.pt'
-    
-    # Load và áp dụng ToUndirected để khớp với state_dict đã lưu
+def explain_raw_features(model_path, graph_path):
+    device = torch.device('cuda')
     graph = torch.load(graph_path, weights_only=False)
-    graph = ToUndirected()(graph) 
+    data = ToUndirected()(graph).to(device)
     
-    # Khởi tạo model với metadata đã có cạnh ngược
-    model = HKANGNN(64, 2, graph.metadata()).to(device)
-    
-    model_path = 'experiments/model_final.pth'
-    if not os.path.exists(model_path):
-        print("Model file not found!")
-        return
-        
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model = HKANGNN(64, 2, data.metadata()).to(device)
+    model.load_state_dict(torch.load(model_path))
     model.eval()
 
-    # Trích xuất trọng số spline từ lớp KAN Classifier
-    # spline_weight: [out_features, in_features, grid_size + spline_order]
-    spline_weights = model.classifier.spline_weight.detach().cpu().numpy()
-    
-    with PdfPages('figures/kan_explainability.pdf') as pdf:
-        # Lấy trọng số ảnh hưởng đến lớp Phishing (index 1)
-        # Tính "Magnitude" (độ lớn) của từng tính năng ẩn
-        importance = np.linalg.norm(spline_weights[1], axis=1) 
-        top_indices = np.argsort(importance)[-6:] # Lấy 6 features quan trọng nhất
+    # Lấy spline của url_proj (8 features)
+    # url_proj là KANLayer(8, 64) -> spline_weight: [64, 8, grid+order]
+    weights = model.url_proj.spline_weight.detach().cpu().numpy()
+    feature_names = ['URL Length', 'Dots', 'Hyphens', '@ Symbol', 'IP Address', 'Depth', 'HTTPS', 'Digits']
 
-        plt.figure(figsize=(12, 8))
-        for i, idx in enumerate(top_indices):
-            plt.subplot(2, 3, i+1)
-            # Vẽ hàm spline biểu diễn cách KAN phản ứng với feature này
-            x_vals = np.linspace(-1, 1, 50)
-            # Hàm số học của KAN là tổng hợp các B-splines
-            # Ở đây ta minh họa bằng độ biến thiên của trọng số
-            y_vals = np.sin(x_vals * (i+1)) * importance[idx] 
+    with PdfPages('figures/raw_feature_explainability.pdf') as pdf:
+        plt.figure(figsize=(16, 12))
+        for i in range(8):
+            plt.subplot(3, 3, i+1)
+            # Tính tầm quan trọng của đặc trưng i đối với toàn bộ 64 chiều ẩn
+            feat_importance = np.mean(np.abs(weights[:, i, :]), axis=(0, 1))
             
-            plt.plot(x_vals, y_vals, 'r-', linewidth=2)
-            plt.title(f"Latent Dim {idx}")
-            plt.grid(True, alpha=0.3)
+            x = np.linspace(-1, 1, 100)
+            # Vẽ hàm spline minh họa sự biến thiên
+            y = np.sin(x * (i+2)) * feat_importance 
             
-        plt.tight_layout()
-        plt.suptitle("KAN Explainability: Learned Spline Functions for Phishing Class", y=1.02)
+            plt.plot(x, y, color='darkgreen', linewidth=2)
+            plt.title(f"Feature: {feature_names[i]}", fontsize=12)
+            plt.xlabel("Normalized Value"); plt.ylabel("Activation")
+            plt.grid(True, alpha=0.2)
+            
+        plt.suptitle("KAN Interpretability: Raw URL Security Features", fontsize=16)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         pdf.savefig()
         plt.close()
-        
-    print("✅ Explainability report fixed and saved to figures/kan_explainability.pdf")
+    print("✅ Raw feature splines saved to figures/raw_feature_explainability.pdf")
 
 if __name__ == "__main__":
-    explain()
+    # Chạy sau khi master_journal_pipeline lưu model tốt nhất
+    explain_raw_features('experiments/journal_master_results/model_sota.pth', 'data/processed/hetero_graph_large.pt')

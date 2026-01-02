@@ -1,53 +1,54 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import HeteroConv, SAGEConv
+from torch_geometric.nn import HeteroConv, GATConv
 from src.models.kan_layer import KANLayer
 
 class HKANGNN(nn.Module):
-    def __init__(self, hidden_channels, out_channels, metadata):
+    def __init__(self, hidden_channels, out_channels, metadata, use_gating=True):
         super().__init__()
+        self.use_gating = use_gating
         
-        # BERT vẫn dùng Linear vì chiều quá lớn (768)
         self.email_proj = nn.Linear(768, hidden_channels)
-        
-        # URL và Sender dùng KAN vì chiều nhỏ (8 và 1), KAN sẽ học tốt hơn MLP ở đây
         self.url_proj = KANLayer(8, hidden_channels)
         self.sender_proj = KANLayer(1, hidden_channels)
 
         self.conv1 = HeteroConv({
-            edge_type: SAGEConv(hidden_channels, hidden_channels)
+            edge_type: GATConv(hidden_channels, hidden_channels, heads=2, concat=False, add_self_loops=False)
             for edge_type in metadata[1]
-        }, aggr='mean')
+        }, aggr='sum')
         
-        # BN là "chìa khóa" để KAN hoạt động
-        self.bn_email = nn.BatchNorm1d(hidden_channels)
         self.bn_combined = nn.BatchNorm1d(hidden_channels * 2)
-
+        self.gate = nn.Parameter(torch.tensor([0.0])) 
         self.classifier = KANLayer(hidden_channels * 2, out_channels)
 
     def forward(self, x_dict, edge_index_dict):
-        # 1. Projection với KAN cho các node số
-        x_dict['email'] = self.email_proj(x_dict['email'])
-        x_dict['url'] = self.url_proj(x_dict['url'])
-        x_dict['sender'] = self.sender_proj(x_dict['sender'])
-        
-        # Chuẩn hóa ngay sau khi proj
-        x_dict = {k: torch.tanh(v) for k, v in x_dict.items()} 
-
-        res_email = x_dict['email']
+        # 1. Hybrid Projection
+        x_dict = {
+            'email': self.email_proj(x_dict['email']),
+            'url': self.url_proj(x_dict['url']),
+            'sender': self.sender_proj(x_dict['sender'])
+        }
+        x_dict = {k: torch.tanh(v) for k, v in x_dict.items()}
+        bert_info = x_dict['email']
 
         # 2. Message Passing
-        gnn_out = self.conv1(x_dict, edge_index_dict)
-        for node_type, x in gnn_out.items():
-            x_dict[node_type] = x
+        try:
+            gnn_out = self.conv1(x_dict, edge_index_dict)
+            graph_info = gnn_out['email']
+        except:
+            graph_info = torch.zeros_like(bert_info)
 
-        x_dict = {key: F.leaky_relu(x, 0.2) for key, x in x_dict.items()}
+        graph_info = F.leaky_relu(graph_info, 0.2)
 
-        # 3. Concatenation & BatchNorm (Ép dữ liệu về dải của KAN)
-        combined = torch.cat([x_dict['email'], res_email], dim=-1)
-        combined = self.bn_combined(combined) 
+        # 3. Gated or Direct Fusion
+        if self.use_gating:
+            alpha = torch.sigmoid(self.gate)
+            combined = torch.cat([alpha * graph_info, (1 - alpha) * bert_info], dim=-1)
+        else:
+            # Direct concatenation (No gating)
+            combined = torch.cat([graph_info, bert_info], dim=-1)
 
-        # 4. KAN Classification
+        combined = self.bn_combined(combined)
         out = self.classifier(combined)
         return out

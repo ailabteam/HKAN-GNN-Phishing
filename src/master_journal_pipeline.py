@@ -6,17 +6,19 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
-from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, precision_recall_curve, auc, classification_report
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, precision_recall_curve, auc
 from torch_geometric.transforms import ToUndirected
 import os
-import time
 import random
 import copy
+
+# Imports models
 from src.models.hkan_gnn import HKANGNN
 from src.models.hgnn_mlp import HGNNMLP
+from src.models.han_baseline import HANModel # Giả sử bạn đặt tên class là HANModel
 
 # ==========================================
-# FINAL CONFIGURATIONS (Sync for Paper)
+# SYNCED CONFIGURATIONS
 # ==========================================
 SEEDS = [42, 123, 2024, 88, 777]
 EPOCHS = 150
@@ -25,7 +27,6 @@ LR = 0.0005
 GRAPH_PATH = 'data/processed/hetero_graph_large.pt'
 OUTPUT_DIR = 'experiments/journal_master_results'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs('figures', exist_ok=True)
 
 def set_seed(seed):
     random.seed(seed)
@@ -34,29 +35,36 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
 
-def train_model(model_type, graph, seed, is_ablation=False, edge_types_to_keep=None):
+def train_model(model_type, graph, seed, is_ablation=False, edge_types_to_keep=None, use_gating=True):
     set_seed(seed)
     device = torch.device('cuda')
     data = copy.deepcopy(graph)
-    
-    # Xử lý Ablation nếu cần
+
+    # Xử lý Ablation: Xóa cạnh nếu cần
     if is_ablation and edge_types_to_keep is not None:
         all_et = list(data.edge_index_dict.keys())
         for et in all_et:
             if et not in edge_types_to_keep:
                 data[et].edge_index = torch.empty((2, 0), dtype=torch.long)
-                
+
     data = ToUndirected()(data).to(device)
-    
+
+    # Khởi tạo mô hình dựa trên loại
     if model_type == 'HKAN-GNN':
-        model = HKANGNN(HIDDEN, 2, data.metadata()).to(device)
-    else:
+        model = HKANGNN(HIDDEN, 2, data.metadata(), use_gating=use_gating).to(device)
+    elif model_type == 'HMLP-GNN':
         model = HGNNMLP(HIDDEN, 2, data.metadata()).to(device)
-        
+    elif model_type == 'HAN':
+        model = HANModel(HIDDEN, 2, data.metadata()).to(device)
+    elif model_type == 'BERT-only':
+        # BERT-only là HKAN-GNN nhưng không có cạnh
+        for et in list(data.edge_index_dict.keys()):
+            data[et].edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        model = HKANGNN(HIDDEN, 2, data.metadata(), use_gating=False).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     weights = torch.tensor([1.0, 7.0]).to(device)
-    
-    history = {'loss': []}
+
     for epoch in range(EPOCHS + 1):
         model.train()
         optimizer.zero_grad()
@@ -64,100 +72,78 @@ def train_model(model_type, graph, seed, is_ablation=False, edge_types_to_keep=N
         loss = F.cross_entropy(out[data['email'].train_mask], data['email'].y[data['email'].train_mask], weight=weights)
         loss.backward()
         optimizer.step()
-        history['loss'].append(loss.item())
-        
+
     model.eval()
     with torch.no_grad():
         out = model(data.x_dict, data.edge_index_dict)
         probs = F.softmax(out[data['email'].test_mask], dim=1)[:, 1].cpu().numpy()
         pred = out[data['email'].test_mask].argmax(dim=1).cpu().numpy()
         y_true = data['email'].y[data['email'].test_mask].cpu().numpy()
-        
+
     return {
         'f1': f1_score(y_true, pred),
-        'prec': precision_score(y_true, pred),
         'rec': recall_score(y_true, pred),
         'acc': (pred == y_true).mean(),
-        'cm': confusion_matrix(y_true, pred),
         'probs': probs,
         'y_true': y_true,
-        'loss_hist': history['loss'],
+        'cm': confusion_matrix(y_true, pred),
         'model': model
     }
 
 def run_everything():
     graph = torch.load(GRAPH_PATH, weights_only=False)
     
-    # 1. MAIN COMPARISON (5 SEEDS)
-    print("Step 1: Running Main Comparison (5 Seeds)...")
-    main_results = {'HKAN-GNN': [], 'HMLP-GNN': []}
-    for m_type in main_results.keys():
+    # 1. THÊM HAN VÀ BERT-ONLY VÀO SO SÁNH CHÍNH (5 SEEDS)
+    print("Step 1: Running Comparison (HKAN, HMLP, HAN, BERT-only)...")
+    model_types = ['HKAN-GNN', 'HMLP-GNN', 'HAN', 'BERT-only']
+    all_main_results = {m: [] for m in model_types}
+    
+    for m_type in model_types:
         for s in SEEDS:
             print(f"  Training {m_type} Seed {s}...")
-            main_results[m_type].append(train_model(m_type, graph, s))
+            all_main_results[m_type].append(train_model(m_type, graph, s))
 
-    # 2. ABLATION STUDY (Sử dụng Seed 42 làm chuẩn)
-    print("Step 2: Running Ablation Study...")
-    ablation_results = []
-    configs = [
-        ("Full HKAN-GNN", [('email', 'sent_by', 'sender'), ('email', 'contains', 'url')]),
-        ("No-URL Entity", [('email', 'sent_by', 'sender')]),
-        ("No-Sender Entity", [('email', 'contains', 'url')]),
-        ("Text-only (No GNN)", [])
+    # 2. ABLATION STUDY (Seed 42) - Thêm No-Gating
+    print("Step 2: Running Ablation Study (including Gating)...")
+    ab_edges = [('email', 'sent_by', 'sender'), ('email', 'contains', 'url')]
+    ab_configs = [
+        ("Full HKAN-GNN", ab_edges, True),
+        ("No-Gating Ablation", ab_edges, False),
+        ("No-URL Entity", [('email', 'sent_by', 'sender')], True),
+        ("Text-only (No GNN)", [], False)
     ]
-    for name, edges in configs:
+    ab_table = []
+    for name, edges, gate_status in ab_configs:
         print(f"  Ablation: {name}...")
-        res = train_model('HKAN-GNN', graph, 42, is_ablation=True, edge_types_to_keep=edges)
-        ablation_results.append({'Setting': name, 'F1': res['f1']})
+        res = train_model('HKAN-GNN', graph, 42, is_ablation=True, edge_types_to_keep=edges, use_gating=gate_status)
+        ab_table.append({'Setting': name, 'F1': res['f1']})
 
-    # 3. EXPORT FIGURES (PDF)
-    print("Step 3: Exporting Figures...")
-    with PdfPages(f'figures/final_master_plots.pdf') as pdf:
-        # Fig 2: Confusion Matrix (HKAN Seed 42)
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(main_results['HKAN-GNN'][0]['cm'], annot=True, fmt='d', cmap='Blues')
-        plt.title('Figure 2: Confusion Matrix (HKAN-GNN)')
-        pdf.savefig(); plt.close()
+    # 3. EXPORT TABLES
+    print("Step 3: Exporting Sync Tables...")
+    perf_data = []
+    for m in model_types:
+        f1s = [r['f1'] for r in all_main_results[m]]
+        accs = [r['acc'] for r in all_main_results[m]]
+        recs = [r['rec'] for r in all_main_results[m]]
+        perf_data.append({
+            'Model': m,
+            'Acc': f"{np.mean(accs):.4f} ± {np.std(accs):.4f}",
+            'F1': f"{np.mean(f1s):.4f} ± {np.std(f1s):.4f}",
+            'Recall': f"{np.mean(recs):.4f} ± {np.std(recs):.4f}"
+        })
+    pd.DataFrame(perf_data).to_csv(f"{OUTPUT_DIR}/Table_III_Performance_Extended.csv", index=False)
+    pd.DataFrame(ab_table).to_csv(f"{OUTPUT_DIR}/Table_V_Ablation_Gated.csv", index=False)
 
-        # Fig 3: PR-Curve
-        plt.figure(figsize=(8, 6))
-        for m in main_results:
-            y_t, prb = main_results[m][0]['y_true'], main_results[m][0]['probs']
+    # 4. EXPORT FIGURES (PR-Curve so sánh cả 4)
+    with PdfPages('figures/final_master_plots_extended.pdf') as pdf:
+        plt.figure(figsize=(10, 7))
+        for m in model_types:
+            y_t, prb = all_main_results[m][0]['y_true'], all_main_results[m][0]['probs']
             p, r, _ = precision_recall_curve(y_t, prb)
             plt.plot(r, p, label=f"{m} (AUC={auc(r, p):.4f})")
-        plt.title('Figure 3: Precision-Recall Curves'); plt.legend()
-        pdf.savefig(); plt.close()
+        plt.title('Figure 3: PR-Curves (Extended Baselines)'); plt.legend(); pdf.savefig(); plt.close()
 
-        # Fig 4: KAN Splines
-        model = main_results['HKAN-GNN'][0]['model']
-        plt.figure(figsize=(12, 8))
-        sw = model.classifier.spline_weight.detach().cpu().numpy()
-        importance = np.linalg.norm(sw[1], axis=1)
-        top_idx = np.argsort(importance)[-4:]
-        for i, idx in enumerate(top_idx):
-            plt.subplot(2, 2, i+1)
-            x_r = np.linspace(-1, 1, 100)
-            y_r = np.sin(x_r * (i+2)) * importance[idx]
-            plt.plot(x_r, y_r, 'g-'); plt.title(f'Latent Feature {idx}')
-        plt.suptitle('Figure 4: KAN Learned Activation Functions')
-        pdf.savefig(); plt.close()
-
-    # 4. EXPORT TABLES (CSV/LaTeX)
-    print("Step 4: Exporting Tables...")
-    # Table III & IV
-    table_data = []
-    for m in main_results:
-        f1s = [r['f1'] for r in main_results[m]]
-        table_data.append({
-            'Model': m,
-            'Acc': f"{np.mean([r['acc'] for r in main_results[m]]):.4f} ± {np.std([r['acc'] for r in main_results[m]]):.4f}",
-            'F1': f"{np.mean(f1s):.4f} ± {np.std(f1s):.4f}",
-            'Recall': f"{np.mean([r['rec'] for r in main_results[m]]):.4f} ± {np.std([r['rec'] for r in main_results[m]]):.4f}"
-        })
-    pd.DataFrame(table_data).to_csv(f"{OUTPUT_DIR}/Table_III_Performance.csv", index=False)
-    pd.DataFrame(ablation_results).to_csv(f"{OUTPUT_DIR}/Table_V_Ablation.csv", index=False)
-    
-    print(f"\n✅ ALL DONE! Check '{OUTPUT_DIR}' and 'figures/'")
+    print(f"\n✅ Pipeline Sync Complete! Check '{OUTPUT_DIR}'")
 
 if __name__ == "__main__":
     run_everything()
