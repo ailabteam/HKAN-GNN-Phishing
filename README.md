@@ -90,4 +90,3 @@ python src/robustness_test.py
 Bonch-Bruevich Saint Petersburg State University of Telecommunications, Russia  
 Danang Architecture University, Vietnam  
 Email: `do.hf@sut.ru`; `haodp@dau.edu.vn`
-Bạn có thể dán nội dung này vào file `README.md` trên GitHub. Đây là một bộ mặt cực kỳ uy tín cho dự án của bạn! Chúc bạn submit thành công rực rỡ!
